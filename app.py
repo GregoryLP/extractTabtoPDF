@@ -1,5 +1,4 @@
 import streamlit as st
-import tabula
 import pandas as pd
 import tempfile
 import os
@@ -7,12 +6,112 @@ import zipfile
 from io import BytesIO
 import base64
 
+# Essayer d'importer les différentes librairies
+try:
+    import tabula
+    TABULA_AVAILABLE = True
+except ImportError:
+    TABULA_AVAILABLE = False
+
+try:
+    import fitz  # PyMuPDF
+    PYMUPDF_AVAILABLE = True
+except ImportError:
+    PYMUPDF_AVAILABLE = False
+
+try:
+    import pdfplumber
+    PDFPLUMBER_AVAILABLE = True
+except ImportError:
+    PDFPLUMBER_AVAILABLE = False
+
 # Configuration de la page
 st.set_page_config(
     page_title="Extracteur de Tableaux PDF",
     page_icon="📊",
     layout="wide"
 )
+
+def process_pdf_with_pymupdf(tmp_file_path):
+    """Extrait les tableaux avec PyMuPDF (sans Java)"""
+    try:
+        doc = fitz.open(tmp_file_path)
+        resultats_intermediaires = []
+        total_tables = 0
+        
+        for page_num in range(len(doc)):
+            page = doc[page_num]
+            tables = page.find_tables()
+            total_tables += len(tables)
+            
+            for table in tables:
+                try:
+                    df = table.to_pandas()
+                    if not df.empty:
+                        table_str = df.astype(str).apply(lambda x: ' '.join(x), axis=1).str.cat(sep=' ')
+                        if "Consommation totale électrique" in table_str:
+                            resultats_intermediaires.append((page_num, df))
+                except Exception as e:
+                    continue
+        
+        doc.close()
+        return resultats_intermediaires, total_tables
+    except Exception as e:
+        raise Exception(f"Erreur PyMuPDF: {e}")
+
+def process_pdf_with_pdfplumber(tmp_file_path):
+    """Extrait les tableaux avec pdfplumber (sans Java)"""
+    try:
+        import pdfplumber
+        
+        resultats_intermediaires = []
+        total_tables = 0
+        
+        with pdfplumber.open(tmp_file_path) as pdf:
+            for page_num, page in enumerate(pdf.pages):
+                tables = page.extract_tables()
+                total_tables += len(tables)
+                
+                for table in tables:
+                    if table and len(table) > 1:
+                        try:
+                            # Convertir en DataFrame
+                            df = pd.DataFrame(table[1:], columns=table[0])
+                            table_str = df.astype(str).apply(lambda x: ' '.join(x), axis=1).str.cat(sep=' ')
+                            
+                            if "Consommation totale électrique" in table_str:
+                                resultats_intermediaires.append((page_num, df))
+                        except Exception as e:
+                            continue
+        
+        return resultats_intermediaires, total_tables
+    except Exception as e:
+        raise Exception(f"Erreur pdfplumber: {e}")
+
+def process_pdf_with_tabula(tmp_file_path):
+    """Extrait les tableaux avec tabula (nécessite Java)"""
+    try:
+        tables = tabula.read_pdf(
+            tmp_file_path, 
+            pages='all', 
+            multiple_tables=True, 
+            lattice=True
+        )
+        
+        resultats_intermediaires = []
+        
+        for i, table in enumerate(tables):
+            if table.empty:
+                continue
+            
+            table_str = table.astype(str).apply(lambda x: ' '.join(x), axis=1).str.cat(sep=' ')
+            
+            if "Consommation totale électrique" in table_str:
+                resultats_intermediaires.append((i, table))
+        
+        return resultats_intermediaires, len(tables)
+    except Exception as e:
+        raise Exception(f"Erreur tabula: {e}")
 
 def process_pdf(uploaded_file):
     """Traite le PDF et extrait les tableaux de consommation"""
@@ -30,30 +129,52 @@ def process_pdf(uploaded_file):
         status_text.text("🔍 Lecture du PDF...")
         progress_bar.progress(25)
         
-        # Lire toutes les tables de toutes les pages
-        tables = tabula.read_pdf(
-            tmp_file_path, 
-            pages='all', 
-            multiple_tables=True, 
-            lattice=True
-        )
+        # Essayer différentes méthodes d'extraction
+        resultats_intermediaires = []
+        total_tables = 0
+        method_used = ""
+        
+        # Méthode 1: PyMuPDF (sans Java)
+        if PYMUPDF_AVAILABLE:
+            try:
+                status_text.text("🔍 Extraction avec PyMuPDF...")
+                resultats_intermediaires, total_tables = process_pdf_with_pymupdf(tmp_file_path)
+                method_used = "PyMuPDF"
+                if resultats_intermediaires:
+                    st.info(f"✅ Extraction réussie avec {method_used}")
+            except Exception as e:
+                st.warning(f"PyMuPDF a échoué: {e}")
+        
+        # Méthode 2: pdfplumber (sans Java) si PyMuPDF n'a pas fonctionné
+        if not resultats_intermediaires and PDFPLUMBER_AVAILABLE:
+            try:
+                status_text.text("🔍 Extraction avec pdfplumber...")
+                resultats_intermediaires, total_tables = process_pdf_with_pdfplumber(tmp_file_path)
+                method_used = "pdfplumber"
+                if resultats_intermediaires:
+                    st.info(f"✅ Extraction réussie avec {method_used}")
+            except Exception as e:
+                st.warning(f"pdfplumber a échoué: {e}")
+        
+        # Méthode 3: tabula (nécessite Java) en dernier recours
+        if not resultats_intermediaires and TABULA_AVAILABLE:
+            try:
+                status_text.text("🔍 Extraction avec tabula...")
+                resultats_intermediaires, total_tables = process_pdf_with_tabula(tmp_file_path)
+                method_used = "tabula"
+                if resultats_intermediaires:
+                    st.info(f"✅ Extraction réussie avec {method_used}")
+            except Exception as e:
+                st.error(f"Tabula a échoué (Java requis): {e}")
+        
+        if not resultats_intermediaires:
+            # Afficher les options d'installation
+            st.error("❌ Aucune méthode d'extraction n'a fonctionné")
+            show_installation_help()
+            return [], total_tables, 0
         
         status_text.text("📊 Analyse des tableaux...")
         progress_bar.progress(50)
-        
-        # Liste pour stocker les tableaux pertinents
-        resultats_intermediaires = []
-        
-        # Parcourir les tables et filtrer
-        for i, table in enumerate(tables):
-            if table.empty:
-                continue
-            
-            # Convertir en texte brut pour vérifier le contenu
-            table_str = table.astype(str).apply(lambda x: ' '.join(x), axis=1).str.cat(sep=' ')
-            
-            if "Consommation totale électrique" in table_str:
-                resultats_intermediaires.append((i, table))
         
         status_text.text("💾 Préparation des fichiers...")
         progress_bar.progress(75)
@@ -91,12 +212,13 @@ def process_pdf(uploaded_file):
                     st.warning(f"Impossible de combiner les tableaux: {e}")
         
         progress_bar.progress(100)
-        status_text.text("✅ Traitement terminé!")
+        status_text.text(f"✅ Traitement terminé avec {method_used}!")
         
-        return csv_files, len(tables), len(resultats_intermediaires)
+        return csv_files, total_tables, len(resultats_intermediaires)
         
     except Exception as e:
         st.error(f"Erreur lors du traitement: {e}")
+        show_installation_help()
         return [], 0, 0
     
     finally:
@@ -105,6 +227,37 @@ def process_pdf(uploaded_file):
             os.unlink(tmp_file_path)
         except:
             pass
+
+def show_installation_help():
+    """Affiche l'aide pour l'installation des dépendances"""
+    st.markdown("### 🔧 Installation des dépendances")
+    
+    st.markdown("**Option 1 - Sans Java (Recommandé) :**")
+    st.code("pip install PyMuPDF pdfplumber pandas")
+    
+    st.markdown("**Option 2 - Avec Java :**")
+    st.code("pip install tabula-py pandas")
+    st.markdown("Puis installer Java depuis https://adoptium.net/")
+    
+    available_methods = []
+    if PYMUPDF_AVAILABLE:
+        available_methods.append("✅ PyMuPDF")
+    else:
+        available_methods.append("❌ PyMuPDF")
+    
+    if PDFPLUMBER_AVAILABLE:
+        available_methods.append("✅ pdfplumber")
+    else:
+        available_methods.append("❌ pdfplumber")
+    
+    if TABULA_AVAILABLE:
+        available_methods.append("✅ tabula")
+    else:
+        available_methods.append("❌ tabula")
+    
+    st.markdown("**Méthodes disponibles :**")
+    for method in available_methods:
+        st.markdown(f"- {method}")
 
 def create_download_zip(csv_files):
     """Crée un fichier ZIP contenant tous les CSV"""
@@ -239,11 +392,33 @@ def main():
         """)
         
         st.markdown("### 🔧 Dépendances requises")
-        st.code("""
-pip install streamlit
-pip install tabula-py
-pip install pandas
-        """)
+        
+        if not PYMUPDF_AVAILABLE and not PDFPLUMBER_AVAILABLE:
+            st.error("❌ Aucune librairie d'extraction PDF installée!")
+            st.code("pip install PyMuPDF pdfplumber")
+        else:
+            st.success("✅ Au moins une librairie d'extraction disponible")
+        
+        st.markdown("**Méthodes d'extraction :**")
+        methods_status = [
+            ("PyMuPDF", PYMUPDF_AVAILABLE, "Sans Java, rapide"),
+            ("pdfplumber", PDFPLUMBER_AVAILABLE, "Sans Java, précis"),
+            ("tabula", TABULA_AVAILABLE, "Nécessite Java")
+        ]
+        
+        for name, available, description in methods_status:
+            status = "✅" if available else "❌"
+            st.markdown(f"- {status} **{name}** : {description}")
+        
+        if not any([PYMUPDF_AVAILABLE, PDFPLUMBER_AVAILABLE, TABULA_AVAILABLE]):
+            st.warning("🚨 Installez au moins une librairie pour continuer")
+            st.code("""
+# Installation recommandée (sans Java)
+pip install PyMuPDF pdfplumber pandas
+
+# Ou avec Java
+pip install tabula-py pandas
+            """)
 
 if __name__ == "__main__":
     main()
