@@ -113,6 +113,23 @@ def process_pdf_with_tabula(tmp_file_path):
     except Exception as e:
         raise Exception(f"Erreur tabula: {e}")
 
+def sanitize_columns(df):
+    """Nettoie les colonnes pour éviter les doublons ou noms vides"""
+    cols = []
+    seen = {}
+    for i, col in enumerate(df.columns):
+        if not col or pd.isna(col):
+            col = f"col_{i}"
+        if col in seen:
+            seen[col] += 1
+            col = f"{col}_{seen[col]}"
+        else:
+            seen[col] = 0
+        cols.append(col)
+    df.columns = cols
+    return df
+
+
 def process_pdf(uploaded_file):
     """Traite le PDF et extrait les tableaux de consommation"""
     
@@ -186,6 +203,7 @@ def process_pdf(uploaded_file):
             # Créer un fichier pour chaque tableau trouvé
             for idx, (table_num, df) in enumerate(resultats_intermediaires, start=1):
                 csv_buffer = BytesIO()
+                df = sanitize_columns(df)
                 df.to_csv(csv_buffer, index=False, encoding='utf-8')
                 csv_buffer.seek(0)
                 
@@ -269,6 +287,8 @@ def create_download_zip(csv_files):
     
     zip_buffer.seek(0)
     return zip_buffer.getvalue()
+
+
 
 def main():
     # Titre principal
